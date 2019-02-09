@@ -6,6 +6,7 @@ import javafx.scene.control.Alert.AlertType;
 import javafx.scene.control.Menu;
 import javafx.scene.control.MenuItem;
 import javafx.scene.control.SeparatorMenuItem;
+
 import matcher.Matcher.MatchingStatus;
 import matcher.gui.Gui;
 import matcher.type.MatchType;
@@ -25,6 +26,14 @@ public class MatchingMenu extends Menu {
 		menuItem.setOnAction(event -> gui.runProgressTask(
 				"Auto matching...",
 				gui.getMatcher()::autoMatchAll,
+				() -> gui.onMatchChange(EnumSet.allOf(MatchType.class)),
+				Throwable::printStackTrace));
+
+		menuItem = new MenuItem("Class merge match");
+		getItems().add(menuItem);
+		menuItem.setOnAction(event -> gui.runProgressTask(
+				"Merge matching classes...",
+				gui.getMatcher()::mergeMatchClasses,
 				() -> gui.onMatchChange(EnumSet.allOf(MatchType.class)),
 				Throwable::printStackTrace));
 

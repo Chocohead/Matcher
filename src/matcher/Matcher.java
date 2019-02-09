@@ -10,9 +10,11 @@ import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -25,8 +27,11 @@ import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import org.objectweb.asm.tree.MethodNode;
+
 import matcher.classifier.ClassClassifier;
 import matcher.classifier.ClassifierLevel;
+import matcher.classifier.ClassifierUtil;
 import matcher.classifier.FieldClassifier;
 import matcher.classifier.IRanker;
 import matcher.classifier.MethodClassifier;
@@ -669,6 +674,101 @@ public class Matcher {
 		if (!conflictingMatches.isEmpty()) {
 			matches.values().removeAll(conflictingMatches);
 		}
+	}
+
+	public boolean mergeMatchClasses(DoubleConsumer progressReceiver) {
+		Predicate<ClassInstance> filter = cls -> cls.getUri() != null && cls.isNameObfuscated() && !cls.isFullyMatched();
+
+		Map<Boolean, List<ClassInstance>> classes = env.getClassesA().stream()
+				.filter(filter)
+				.collect(Collectors.partitioningBy(cls -> cls.getMatch() == null));
+		List<ClassInstance> unmatchedClasses = classes.get(Boolean.TRUE);
+		List<ClassInstance> semimatchedClasses = classes.get(Boolean.FALSE);
+
+		ClassInstance[] cmpClasses = env.getClassesB().stream()
+				.filter(filter)
+				.toArray(ClassInstance[]::new);
+
+		Queue<ClassInstance> mismatches = new ConcurrentLinkedQueue<>();
+		Map<ClassInstance, ClassInstance> matches = new ConcurrentHashMap<>(classes.size());
+
+		runInParallel(semimatchedClasses, cls -> {
+			//Look to see if partially matched classes are mismatched from methods with identical signatures having different bytecode
+			ClassInstance match = cls.getMatch();
+			assert match != null;
+
+			/*MethodInstance[] matchMethods = match.getMethods();
+			int nextMatchPos = 0;
+
+			out: */for (MethodInstance method : cls.getMethods()) {
+				MethodNode node = method.getAsmNode();
+				if (node == null || method.getMatch() == null) continue;
+
+				double closeness = ClassifierUtil.compareInsns(node.instructions, method.getMatch().getAsmNode().instructions, env);
+				if (closeness < 0.99) {
+					System.out.println("Method contents mismatch in " + cls.getName() + '#' + method.getName() + ", only matched with " + closeness);
+					mismatches.add(cls);
+				}
+				/*for (int pos = nextMatchPos; pos < matchMethods.length; pos++) {
+					if (sameMethodDesc(method, match.getMethod(pos))) {
+						double closeness = ClassifierUtil.compareInsns(node.instructions, match.getMethod(pos).getAsmNode().instructions, env);
+						if (closeness < 0.99) {
+							System.out.println("Method contents mismatch in " + cls.getName() + '#' + method.getName() + ", only matched with " + closeness);
+							mismatches.add(cls);
+							break out;
+						}
+
+						nextMatchPos = pos + 1;
+						continue out;
+					}
+				}
+
+				for (int pos = 0; pos < nextMatchPos; pos++) {
+					if (sameMethodDesc(method, match.getMethod(pos))) {
+						System.out.println("Method out of order at position " + pos + " in " + cls.getName() + " (expected at least " + nextMatchPos + ')');
+						mismatches.add(cls);
+						break out;
+					}
+				}*/
+
+				//If we reach here the method hasn't been found in match at all
+				//Which is fine given there are ones that will only exist on one side
+			}
+		}, progress -> progressReceiver.accept(progress * 0.5));
+
+		//Unmatch everything that we've decided is incorrectly matched
+		if (!mismatches.isEmpty()) {
+			unmatchedClasses.addAll(mismatches);
+			unmatchedClasses.forEach(this::unmatch);
+		}
+
+		runInParallel(unmatchedClasses, cls -> {
+
+		}, progress -> progressReceiver.accept(0.5 + progress * 0.5));
+
+		sanitizeMatches(matches);
+
+		for (Map.Entry<ClassInstance, ClassInstance> entry : matches.entrySet()) {
+			match(entry.getKey(), entry.getValue());
+		}
+
+		System.out.println("Merge matched "+matches.size()+" classes ("+(classes.size() - matches.size())+" unmatched, "+env.getClassesA().size()+" total)");
+
+		return !matches.isEmpty();
+	}
+
+	private static boolean sameMethodDesc(MethodInstance a, MethodInstance b) {
+		if (!ClassifierUtil.checkPotentialEquality(a.getRetType(), b.getRetType())) return false;
+
+		MethodVarInstance[] aArgs = a.getArgs();
+		MethodVarInstance[] bArgs = b.getArgs();
+		if (aArgs.length != bArgs.length) return false;
+
+		for (int i = 0; i < aArgs.length; i++) {
+			if (!ClassifierUtil.checkPotentialEquality(aArgs[i], bArgs[i])) return false;
+		}
+
+		return true;
 	}
 
 	public MatchingStatus getStatus(boolean inputsOnly) {
