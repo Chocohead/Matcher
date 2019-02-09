@@ -22,6 +22,7 @@ import org.objectweb.asm.tree.ClassNode;
 import matcher.Util;
 import matcher.bcremap.AsmClassRemapper;
 import matcher.bcremap.AsmRemapper;
+import matcher.classifier.ClassifierUtil;
 import matcher.type.Signature.ClassSignature;
 
 public class ClassInstance implements IMatchable<ClassInstance> {
@@ -152,6 +153,54 @@ public class ClassInstance implements IMatchable<ClassInstance> {
 		assert cls == null || cls.getEnv() != env && !cls.getEnv().isShared();
 
 		this.matchedClass = cls;
+	}
+
+	public boolean isFullyMatched() {
+		if (matchedClass == null) return false;
+
+		boolean found = false;
+
+		for (MethodInstance method : matchedClass.getMethods()) {
+			if (!method.hasMatch()) {
+				found = true;
+				break;
+			}
+		}
+
+		if (found) {
+			for (MethodInstance methodA : getMethods()) {
+				if (methodA.hasMatch()) continue;
+
+				for (MethodInstance methodB : matchedClass.getMethods()) {
+					if (!methodB.hasMatch() && ClassifierUtil.checkPotentialEquality(methodA, methodB)) {
+						return false;
+					}
+				}
+			}
+		}
+
+		found = false;
+
+		for (FieldInstance field : matchedClass.getFields()) {
+			if (!field.hasMatch()) {
+				found = true;
+				break;
+			}
+		}
+
+		if (found) {
+			for (FieldInstance fieldA : getFields()) {
+				if (fieldA.hasMatch()) continue;
+
+				for (FieldInstance fieldB : matchedClass.getFields()) {
+					if (!fieldB.hasMatch() && ClassifierUtil.checkPotentialEquality(fieldA, fieldB)) {
+						return false;
+					}
+				}
+			}
+		}
+
+		return true;
 	}
 
 	@Override

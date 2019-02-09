@@ -10,7 +10,7 @@ import javafx.collections.FXCollections;
 import javafx.geometry.Orientation;
 import javafx.scene.control.ListView;
 import javafx.scene.control.SplitPane;
-import matcher.classifier.ClassifierUtil;
+
 import matcher.gui.Gui.SortKey;
 import matcher.type.ClassInstance;
 import matcher.type.FieldInstance;
@@ -38,7 +38,7 @@ public class MatchPaneSrc extends SplitPane implements IFwdGuiComponent, ISelect
 		classList.setCellFactory(new MatchableListCellFactory<ClassInstance>() {
 			@Override
 			protected boolean isFullyMatched(ClassInstance item) {
-				return MatchPaneSrc.isFullyMatched(item);
+				return item.isFullyMatched();
 			}
 		});
 		classList.getSelectionModel().selectedItemProperty().addListener((observable, oldValue, newValue) -> {
@@ -96,55 +96,6 @@ public class MatchPaneSrc extends SplitPane implements IFwdGuiComponent, ISelect
 
 		SplitPane.setResizableWithParent(verticalPane, false);
 		setDividerPosition(0, 0.25);
-	}
-
-	private static boolean isFullyMatched(ClassInstance cls) {
-		ClassInstance matched = cls.getMatch();
-		if (matched == null) return false;
-
-		boolean found = false;
-
-		for (MethodInstance method : matched.getMethods()) {
-			if (!method.hasMatch()) {
-				found = true;
-				break;
-			}
-		}
-
-		if (found) {
-			for (MethodInstance methodA : cls.getMethods()) {
-				if (methodA.hasMatch()) continue;
-
-				for (MethodInstance methodB : matched.getMethods()) {
-					if (!methodB.hasMatch() && ClassifierUtil.checkPotentialEquality(methodA, methodB)) {
-						return false;
-					}
-				}
-			}
-		}
-
-		found = false;
-
-		for (FieldInstance field : matched.getFields()) {
-			if (!field.hasMatch()) {
-				found = true;
-				break;
-			}
-		}
-
-		if (found) {
-			for (FieldInstance fieldA : cls.getFields()) {
-				if (fieldA.hasMatch()) continue;
-
-				for (FieldInstance fieldB : matched.getFields()) {
-					if (!fieldB.hasMatch() && ClassifierUtil.checkPotentialEquality(fieldA, fieldB)) {
-						return false;
-					}
-				}
-			}
-		}
-
-		return true;
 	}
 
 	private static boolean isFullyMatched(MemberInstance<?> member) {
@@ -339,8 +290,8 @@ public class MatchPaneSrc extends SplitPane implements IFwdGuiComponent, ISelect
 		if (a.hasMatch() != b.hasMatch()) {
 			return a.hasMatch() ? 1 : -1;
 		} else {
-			boolean aFull = isFullyMatched(a);
-			boolean bFull = isFullyMatched(b);
+			boolean aFull = a.isFullyMatched();
+			boolean bFull = b.isFullyMatched();
 
 			if (aFull == bFull) {
 				return 0;
