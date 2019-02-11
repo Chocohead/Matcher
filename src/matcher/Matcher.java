@@ -27,7 +27,14 @@ import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import org.objectweb.asm.Type;
+import org.objectweb.asm.tree.AbstractInsnNode;
+import org.objectweb.asm.tree.FieldInsnNode;
+import org.objectweb.asm.tree.InsnList;
+import org.objectweb.asm.tree.LdcInsnNode;
+import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.TypeInsnNode;
 
 import matcher.classifier.ClassClassifier;
 import matcher.classifier.ClassifierLevel;
@@ -677,17 +684,13 @@ public class Matcher {
 	}
 
 	public boolean mergeMatchClasses(DoubleConsumer progressReceiver) {
-		Predicate<ClassInstance> filter = cls -> cls.getUri() != null && cls.isNameObfuscated() && !cls.isFullyMatched();
+		Predicate<ClassInstance> filter = cls -> cls.getUri() != null && cls.isNameObfuscated() && cls.hasMatch();
 
 		Map<Boolean, List<ClassInstance>> classes = env.getClassesA().stream()
 				.filter(filter)
-				.collect(Collectors.partitioningBy(cls -> cls.getMatch() == null));
-		List<ClassInstance> unmatchedClasses = classes.get(Boolean.TRUE);
+				.collect(Collectors.partitioningBy(ClassInstance::isFullyMatched));
+		List<ClassInstance> matchedClasses = classes.get(Boolean.TRUE);
 		List<ClassInstance> semimatchedClasses = classes.get(Boolean.FALSE);
-
-		ClassInstance[] cmpClasses = env.getClassesB().stream()
-				.filter(filter)
-				.toArray(ClassInstance[]::new);
 
 		Queue<ClassInstance> mismatches = new ConcurrentLinkedQueue<>();
 		Map<ClassInstance, ClassInstance> matches = new ConcurrentHashMap<>(classes.size());
@@ -697,53 +700,177 @@ public class Matcher {
 			ClassInstance match = cls.getMatch();
 			assert match != null;
 
-			/*MethodInstance[] matchMethods = match.getMethods();
-			int nextMatchPos = 0;
-
-			out: */for (MethodInstance method : cls.getMethods()) {
+			for (MethodInstance method : cls.getMethods()) {
 				MethodNode node = method.getAsmNode();
 				if (node == null || method.getMatch() == null) continue;
 
 				double closeness = ClassifierUtil.compareInsns(node.instructions, method.getMatch().getAsmNode().instructions, env);
 				if (closeness < 0.99) {
-					System.out.println("Method contents mismatch in " + cls.getName() + '#' + method.getName() + ", only matched with " + closeness);
+					System.out.println("Method contents mismatch in " + cls.getName() + '#' + method.getName() + method.getDesc() + ", only matched with " + closeness);
 					mismatches.add(cls);
 				}
-				/*for (int pos = nextMatchPos; pos < matchMethods.length; pos++) {
-					if (sameMethodDesc(method, match.getMethod(pos))) {
-						double closeness = ClassifierUtil.compareInsns(node.instructions, match.getMethod(pos).getAsmNode().instructions, env);
-						if (closeness < 0.99) {
-							System.out.println("Method contents mismatch in " + cls.getName() + '#' + method.getName() + ", only matched with " + closeness);
-							mismatches.add(cls);
-							break out;
-						}
-
-						nextMatchPos = pos + 1;
-						continue out;
-					}
-				}
-
-				for (int pos = 0; pos < nextMatchPos; pos++) {
-					if (sameMethodDesc(method, match.getMethod(pos))) {
-						System.out.println("Method out of order at position " + pos + " in " + cls.getName() + " (expected at least " + nextMatchPos + ')');
-						mismatches.add(cls);
-						break out;
-					}
-				}*/
-
-				//If we reach here the method hasn't been found in match at all
-				//Which is fine given there are ones that will only exist on one side
 			}
 		}, progress -> progressReceiver.accept(progress * 0.5));
 
 		//Unmatch everything that we've decided is incorrectly matched
 		if (!mismatches.isEmpty()) {
-			unmatchedClasses.addAll(mismatches);
-			unmatchedClasses.forEach(this::unmatch);
+			mismatches.forEach(this::unmatch);
+			semimatchedClasses.removeAll(mismatches);
 		}
+		matchedClasses.addAll(semimatchedClasses);
 
-		runInParallel(unmatchedClasses, cls -> {
+		runInParallel(matchedClasses, cls -> {
+			for (MethodInstance method : cls.getMethods()) {
+				//Make sure we've only matching methods that really exist
+				if (!method.isReal()) continue;
 
+				//assert method.hasMatch(): "Unmatched method in fully matched class: " + cls.getName() + '#' + method.getName() + method.getDesc();
+				//Fully matched classes can still have unmatched methods, let's just avoid them for now
+				if (!method.hasMatch()) continue;
+
+				MethodInstance matched = method.getMatch();
+				//The matched method should certainly exist too
+				assert matched.isReal();
+
+				InsnList methodIns = method.getAsmNode().instructions;
+				InsnList matchedIns = matched.getAsmNode().instructions;
+
+				//assert ClassifierUtil.compareInsns(methodIns, matchedIns, env) > 0.99;
+				double closeness = ClassifierUtil.compareInsns(methodIns, matchedIns, env);
+				if (closeness < 0.99) {
+					System.out.println("Unexpected method contents mismatch in " + cls.getName() + '#' + method.getName() + method.getDesc() + ", only matched with " + closeness);
+					continue;
+				}
+				assert methodIns.size() == matchedIns.size();
+
+				MethodVarInstance[] methodArgs = method.getArgs();
+				MethodVarInstance[] matchedArgs = matched.getArgs();
+				assert methodArgs.length == matchedArgs.length;
+
+				for (int i = 0; i < methodArgs.length; i++) {
+					ClassInstance clsA = methodArgs[i].getType();
+					ClassInstance clsB = matchedArgs[i].getType();
+
+					if (clsA.getMatch() != clsB && matches.get(clsA) != clsB) {
+						System.out.println("Found new class match [" + clsA.getName() + " => " + clsB.getName() + "], previously mapped to " + (clsA.hasMatch() ? cls.getMatch().getName() : "nothing"));
+						matches.put(clsA, clsB);
+					}
+				}
+
+				for (int i = 0; i < methodIns.size(); i++) {
+					AbstractInsnNode insnA = methodIns.get(i);
+					AbstractInsnNode insnB = matchedIns.get(i);
+					assert insnA.getType() == insnB.getType();
+					assert insnA.getOpcode() == insnB.getOpcode();
+
+					switch (insnA.getType()) {
+					case AbstractInsnNode.TYPE_INSN: {
+						TypeInsnNode a = (TypeInsnNode) insnA;
+						TypeInsnNode b = (TypeInsnNode) insnB;
+
+						ClassInstance clsA = env.getClsByNameA(a.desc);
+						ClassInstance clsB = env.getClsByNameB(b.desc);
+
+						assert clsA != null;
+						assert clsB != null;
+						if (!clsA.isNameObfuscated()) continue;
+
+						if (clsA.getMatch() != clsB && matches.get(clsA) != clsB) {
+							System.out.println("Found new class match [" + clsA.getName() + " => " + clsB.getName() + "], previously mapped to " + (clsA.hasMatch() ? cls.getMatch().getName() : "nothing"));
+							matches.put(clsA, clsB);
+						}
+						break;
+					}
+					case AbstractInsnNode.FIELD_INSN: {
+						FieldInsnNode a = (FieldInsnNode) insnA;
+						FieldInsnNode b = (FieldInsnNode) insnB;
+
+						ClassInstance clsA = env.getClsByNameA(a.owner);
+						ClassInstance clsB = env.getClsByNameB(b.owner);
+
+						assert clsA != null;
+						assert clsB != null;
+						if (!clsA.isNameObfuscated()) continue;
+
+						if (clsA.getMatch() != clsB && matches.get(clsA) != clsB) {
+							System.out.println("Found new class match [" + clsA.getName() + " => " + clsB.getName() + "], previously mapped to " + (clsA.hasMatch() ? cls.getMatch().getName() : "nothing"));
+							matches.put(clsA, clsB);
+						}
+
+						FieldInstance fieldA = clsA.resolveField(a.name, a.desc);
+						FieldInstance fieldB = clsB.resolveField(b.name, b.desc);
+
+						assert fieldA != null;
+						assert fieldB != null;
+
+						if (fieldA.getMatch() != fieldB) {
+							//System.out.println("Found new field match");
+						}
+						break;
+					}
+					case AbstractInsnNode.METHOD_INSN: {
+						MethodInsnNode a = (MethodInsnNode) insnA;
+						MethodInsnNode b = (MethodInsnNode) insnB;
+
+						ClassInstance clsA = env.getClsByNameA(a.owner);
+						ClassInstance clsB = env.getClsByNameB(b.owner);
+
+						assert clsA != null;
+						assert clsB != null;
+						if (!clsA.isNameObfuscated()) continue;
+
+						if (clsA.getMatch() != clsB && matches.get(clsA) != clsB) {
+							System.out.println("Found new class match [" + clsA.getName() + " => " + clsB.getName() + "], previously mapped to " + (clsA.hasMatch() ? cls.getMatch().getName() : "nothing"));
+							matches.put(clsA, clsB);
+						}
+
+						MethodInstance methodA = clsA.resolveMethod(a.name, a.desc, Util.isCallToInterface(a));
+						MethodInstance methodB = clsB.resolveMethod(b.name, b.desc, Util.isCallToInterface(b));
+
+						assert methodA != null;
+						assert methodB != null;
+
+						if (methodA.getMatch() != methodB) {
+							//System.out.println("Found new method match");
+						}
+						break;
+					}
+					case AbstractInsnNode.LDC_INSN: {
+						LdcInsnNode a = (LdcInsnNode) insnA;
+						LdcInsnNode b = (LdcInsnNode) insnB;
+
+						Class<?> typeClsA = a.cst.getClass();
+						assert typeClsA == b.cst.getClass();
+
+						if (typeClsA == Type.class) {
+							Type typeA = (Type) a.cst;
+							Type typeB = (Type) b.cst;
+
+							assert typeA.getSort() == typeB.getSort();
+
+							switch (typeA.getSort()) {
+							case Type.ARRAY:
+							case Type.OBJECT:
+								ClassInstance clsA = env.getClsByIdA(typeA.getDescriptor());
+								ClassInstance clsB = env.getClsByIdB(typeB.getDescriptor());
+
+								assert clsA != null;
+								assert clsB != null;
+								if (!clsA.isNameObfuscated()) continue;
+
+								if (clsA.getMatch() != clsB && matches.get(clsA) != clsB) {
+									System.out.println("Found new class match [" + clsA.getName() + " => " + clsB.getName() + "], previously mapped to " + (clsA.hasMatch() ? cls.getMatch().getName() : "nothing"));
+									matches.put(clsA, clsB);
+								}
+							}
+						}
+						break;
+					}
+
+					default: break;
+					}
+				}
+			}
 		}, progress -> progressReceiver.accept(0.5 + progress * 0.5));
 
 		sanitizeMatches(matches);
@@ -752,23 +879,10 @@ public class Matcher {
 			match(entry.getKey(), entry.getValue());
 		}
 
-		System.out.println("Merge matched "+matches.size()+" classes ("+(classes.size() - matches.size())+" unmatched, "+env.getClassesA().size()+" total)");
+		long unmatched = env.getClassesA().stream().filter(cls -> cls.getUri() != null && cls.isNameObfuscated() && cls.getMatch() == null).count();
+		System.out.println("Merge matched " + matches.size() + " classes (" + unmatched + " unmatched, " + env.getClassesA().size() + " total)");
 
 		return !matches.isEmpty();
-	}
-
-	private static boolean sameMethodDesc(MethodInstance a, MethodInstance b) {
-		if (!ClassifierUtil.checkPotentialEquality(a.getRetType(), b.getRetType())) return false;
-
-		MethodVarInstance[] aArgs = a.getArgs();
-		MethodVarInstance[] bArgs = b.getArgs();
-		if (aArgs.length != bArgs.length) return false;
-
-		for (int i = 0; i < aArgs.length; i++) {
-			if (!ClassifierUtil.checkPotentialEquality(aArgs[i], bArgs[i])) return false;
-		}
-
-		return true;
 	}
 
 	public MatchingStatus getStatus(boolean inputsOnly) {
